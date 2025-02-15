@@ -94,6 +94,16 @@ flash_sector_lpc11xx = (
         4, 4, 4, 4, 4, 4, 4, 4,
         )
 
+# flash sector sizes for lpc1311 processors (number of sectors and size in kB)
+flash_sector_lpc1311 = (
+        4, 4,
+        )
+
+# flash sector sizes for lpc1313 processors (number of sectors and size in kB)
+flash_sector_lpc1313 = (
+        4, 4, 4, 4, 4, 4, 4, 4,
+        )
+
 # flash sector sizes for lpc18xx processors
 flash_sector_lpc18xx = (
                         8, 8, 8, 8, 8, 8, 8, 8,
@@ -326,6 +336,12 @@ cpu_parms = {
             "devid": 0x0444102B,
             "flash_prog_buffer_size" : 1024
         },
+        "lpc1311" : {
+            "flash_sector" : flash_sector_lpc1311,
+            "flash_prog_buffer_base" : 0x10000400,
+            "devid": 0x2C42502B,
+            "flash_prog_buffer_size" : 1024
+        },
         # lpc18xx
         "lpc1817" : {
             "flash_sector" : flash_sector_lpc18xx,
@@ -447,7 +463,7 @@ class SerialDevice(object):
         # or the device is in the wrong mode.
         # This timeout is too short for slow baud rates but who wants to
         # use them?
-        self._serial.setTimeout(5)
+        self._serial.timeout = 5
         # device wants Xon Xoff flow control
         if xonxoff:
             self._serial.setXonXoff(1)
@@ -491,8 +507,8 @@ class SerialDevice(object):
 
     def readline(self, timeout=None):
         if timeout:
-            ot = self._serial.getTimeout()
-            self._serial.setTimeout(timeout)
+            ot = self._serial.timeout
+            self._serial.timeout = timeout
 
         line = b''
         while True:
@@ -512,7 +528,7 @@ class SerialDevice(object):
             line += c
 
         if timeout:
-            self._serial.setTimeout(ot)
+            self._serial.timeout = ot
 
         return line.decode("UTF-8", "ignore")
 
@@ -533,6 +549,8 @@ class UdpDevice(object):
             res = obj.communicate()
             stdout_text = res[0].decode('ascii', 'ignore') if res[0] else ""
             stderr_text = res[1].decode('ascii', 'ignore') if res[1] else ""
+            log(stdout_text)
+            log(stderr_text)
             if obj.returncode or stderr_text:
                 panic("Failed to register IP address " +
                       "(Administrative privileges may be required)\r\n" +
@@ -550,7 +568,7 @@ class UdpDevice(object):
 
         try:
             line, addr = self._sock.recvfrom(1024)
-        except Exception as e:
+        except Exception as _:
             line = b""
 
         if timeout:
@@ -797,7 +815,7 @@ class nxpprog:
                 ch %= 64
                 c = c * 64 + ch
             s = []
-            for j in range(0, 3):
+            for _ in range(0, 3):
                 s.append(c % 256)
                 c = c // 256
             for j in reversed(s):
@@ -818,7 +836,7 @@ class nxpprog:
             if lines > 20:
                 lines = 20
             cdata = ""
-            for i in range(0, lines):
+            for _ in range(0, lines):
                 line = self.dev_readline()
 
                 decoded = self.uudecode(line)
@@ -869,6 +887,8 @@ class nxpprog:
     def find_flash_sector(self, addr):
         table = self.get_cpu_parm("flash_sector")
         flash_base_addr = self.get_cpu_parm("flash_bank_addr", 0)
+        #print(f"table = {table}")
+        #print(f"flash_base_addr = {flash_base_addr}")
         if flash_base_addr == 0:
             faddr = 0
         else:
@@ -883,7 +903,7 @@ class nxpprog:
 
     def bytestr(self, ch, count):
         data = b''
-        for i in range(0, count):
+        for _ in range(0, count):
             data += bytes([ch])
         return data
 
@@ -947,6 +967,7 @@ class nxpprog:
         global panic
         old_panic = panic
         panic = log
+        cmd = ""
         for i in range(start_sector, end_sector+1):
             if self.sector_commands_need_bank:
                 cmd = ("I %d %d 0" % (i, i))
@@ -954,21 +975,22 @@ class nxpprog:
                 cmd = ("I %d %d" % (i, i))
             result = self.isp_command(cmd)
             if result == str(CMD_SUCCESS):
+                log(f"Sector {i} blank.")
                 pass
             elif result == str(SECTOR_NOT_BLANK):
                 self.dev_readline() # offset
                 self.dev_readline() # content
             else:
-                self.errexit("'%s' error" % cmd, status)
+                self.errexit("'%s' error" % cmd, result)
         panic = old_panic
 
 
     def erase_flash_range(self, start_addr, end_addr, verify=False):
         start_sector = self.find_flash_sector(start_addr)
         end_sector = self.find_flash_sector(end_addr)
-
+        #print(f"start address = {start_addr}, end address = {end_addr}")
+        #print(f"start sector = {start_sector}, end sector = {end_sector}")
         self.erase_sectors(start_sector, end_sector, verify)
-
 
     def get_cpu_parm(self, key, default=None):
         ccpu_parms = cpu_parms.get(self.cpu)
@@ -1027,6 +1049,7 @@ class nxpprog:
             image_len += pad_count
 
         log("Padding with %d bytes" % pad_count)
+        log(f"erase_all = {erase_all}")
 
         if erase_all:
             self.erase_all(verify)
@@ -1057,11 +1080,12 @@ class nxpprog:
                     (flash_addr_start, ram_addr, a_ram_block))
 
             # optionally compare ram and flash
+            cmd = ""
             if verify:
                 old_panic = panic
                 panic = log
-                result = self.isp_command("M %d %d %d" %
-                                          (flash_addr_start, ram_addr, a_ram_block))
+                cmd = ("M %d %d %d" % (flash_addr_start, ram_addr, a_ram_block))
+                result = self.isp_command(cmd)
                 panic = old_panic
                 if result == str(CMD_SUCCESS):
                     pass
@@ -1069,7 +1093,7 @@ class nxpprog:
                     self.dev_readline() # offset
                     success = False
                 else:
-                    self.errexit("'%s' error" % cmd, status)
+                    self.errexit("'%s' error" % cmd, result)
 
         return success
 
